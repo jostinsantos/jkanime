@@ -60,23 +60,40 @@ function pageHeaders(extra) {
 }
 
 function isCloudflareChallenge(html, status) {
-  if (status === 403 || status === 503) return true;
+  if (status === 403 || status === 503) {
+    if (!html || typeof html !== 'string') return true;
+    var s0 = html.slice(0, 2000).toLowerCase();
+    // Solo si parece challenge real (no un error HTML normal)
+    if (
+      s0.indexOf('just a moment') >= 0 ||
+      s0.indexOf('cf-mitigated') >= 0 ||
+      s0.indexOf('challenge-platform') >= 0 ||
+      s0.indexOf('attention required') >= 0
+    ) {
+      return true;
+    }
+    // 403 sin body de challenge: también bloquear
+    return true;
+  }
   if (!html || typeof html !== 'string') return false;
-  var s = html.slice(0, 2800).toLowerCase();
-  return (
-    s.indexOf('just a moment') >= 0 ||
-    s.indexOf('cf-mitigated') >= 0 ||
-    s.indexOf('challenge-platform') >= 0 ||
-    s.indexOf('enable javascript and cookies') >= 0
-  );
+  var s = html.slice(0, 1500).toLowerCase();
+  // Evitar falsos positivos en páginas reales que mencionan cloudflare
+  if (s.indexOf('just a moment') >= 0 && s.indexOf('challenge-platform') >= 0) return true;
+  if (s.indexOf('enable javascript and cookies') >= 0 && html.length < 8000) return true;
+  return false;
 }
 
 async function fetchHtml(url, headers) {
+  var h = headers || pageHeaders();
+  if (__cookieJar && !h.Cookie && !h.cookie) h = Object.assign({}, h, { Cookie: __cookieJar });
   var res = await fetch(url, {
     method: 'GET',
-    headers: headers || pageHeaders(),
+    headers: h,
     redirect: 'follow',
   });
+  try {
+    if (res.headers) mergeCookies(res.headers);
+  } catch (_) {}
   var text = '';
   try {
     text = await res.text();
@@ -91,12 +108,17 @@ async function fetchHtml(url, headers) {
 }
 
 async function fetchPost(url, body, headers) {
+  var h = headers || {};
+  if (__cookieJar && !h.Cookie && !h.cookie) h = Object.assign({}, h, { Cookie: __cookieJar });
   var res = await fetch(url, {
     method: 'POST',
-    headers: headers,
+    headers: h,
     body: body,
     redirect: 'follow',
   });
+  try {
+    if (res.headers) mergeCookies(res.headers);
+  } catch (_) {}
   var text = '';
   try {
     text = await res.text();
@@ -106,6 +128,34 @@ async function fetchPost(url, body, headers) {
   return { status: res.status, text: text, headers: res.headers };
 }
 
+var __cookieJar = '';
+function mergeCookies(resHeaders) {
+  try {
+    if (!resHeaders) return;
+    var sc = resHeaders['set-cookie'] || resHeaders['Set-Cookie'] || '';
+    if (!sc) return;
+    var parts = String(sc).split(/,(?=[^;]+?=)/);
+    var jar = {};
+    String(__cookieJar || '')
+      .split(';')
+      .forEach(function (c) {
+        var t = c.trim();
+        if (!t) return;
+        var i = t.indexOf('=');
+        if (i > 0) jar[t.slice(0, i).trim()] = t.slice(i + 1).trim();
+      });
+    parts.forEach(function (p) {
+      var first = String(p).split(';')[0].trim();
+      var i = first.indexOf('=');
+      if (i > 0) jar[first.slice(0, i).trim()] = first.slice(i + 1).trim();
+    });
+    var out = [];
+    for (var k in jar) {
+      if (Object.prototype.hasOwnProperty.call(jar, k) && jar[k] != null) out.push(k + '=' + jar[k]);
+    }
+    __cookieJar = out.join('; ');
+  } catch (_) {}
+}
 function absUrl(href) {
   if (!href) return '';
   href = String(href).trim();
@@ -220,7 +270,7 @@ function directorioItemsToContent(data) {
     }
     var slug = String(a.slug || slugFromUrl(href) || '').trim();
     items.push({
-      id: slug || href,
+      id: href,
       title: a.title || a.short_title || a.name || 'Anime',
       poster: img,
       backdrop: img,
@@ -300,7 +350,7 @@ async function getHome() {
     if (!title && !detailsUrl) return;
     if (detailsUrl && !/\/$/.test(detailsUrl)) detailsUrl += '/';
     heroItems.push({
-      id: slugFromUrl(detailsUrl) || detailsUrl || ('hero-' + heroItems.length),
+      id: detailsUrl || ('hero-' + heroItems.length),
       title: title || 'Destacado',
       poster: image,
       backdrop: image,
@@ -350,7 +400,7 @@ async function getHome() {
         alt;
       if (!/\/$/.test(href)) href += '/';
       items.push({
-        id: slugFromUrl(href) || href,
+        id: href,
         title: t || 'Anime',
         poster: img,
         backdrop: img,
@@ -392,7 +442,7 @@ async function getHome() {
           clean(link.find('img').attr('alt') || '');
         if (!/\/$/.test(href)) href += '/';
         items.push({
-          id: slugFromUrl(href) || href,
+          id: href,
           title: t || 'Anime',
           poster: img,
           backdrop: img,
@@ -424,7 +474,7 @@ async function getHome() {
     var status = clean($el.find('div.card-info p, p').first().text());
     if (!/\/$/.test(href)) href += '/';
     recent.push({
-      id: slugFromUrl(href) || href,
+      id: href,
       title: t || 'Anime',
       poster: img,
       backdrop: img,
@@ -463,7 +513,7 @@ async function getHome() {
       seen[id] = true;
       if (!/\/$/.test(href)) href += '/';
       grab.push({
-        id: slugFromUrl(href) || href,
+        id: href,
         title: t,
         poster: img,
         backdrop: img,
@@ -635,7 +685,7 @@ function parseSearchHtml(html) {
 
     var slugS = slugFromUrl(href);
     items.push({
-      id: slugS || href,
+      id: href,
       title: title,
       poster: absUrl(image),
       backdrop: absUrl(image),
@@ -653,12 +703,13 @@ async function search(query) {
   var q = clean(query);
   if (!q) return [];
 
-  // URL real: https://jkanime.net/buscar/anohana
-  var pathQ = encodeURIComponent(q).replace(/%20/g, '+');
+  // Como BuscarApi de tu lib: https://jkanime.net/buscar/{encodeURIComponent(q)}
+  var encoded = encodeURIComponent(q);
+  var pathPlus = encoded.replace(/%20/g, '+');
   var urls = [
-    baseUrl() + '/buscar/' + pathQ,
-    baseUrl() + '/buscar/' + pathQ + '/',
-    baseUrl() + '/buscar/' + encodeURIComponent(q),
+    baseUrl() + '/buscar/' + encoded,
+    baseUrl() + '/buscar/' + pathPlus,
+    baseUrl() + '/buscar/' + encoded + '/',
   ];
 
   var lastErr = null;
@@ -667,10 +718,38 @@ async function search(query) {
       var html = await fetchHtml(urls[i]);
       var items = parseSearchHtml(html);
       if (items.length) return items;
+      // a veces el HTML viene sin page_directorio pero con anime__item
+      if (!items.length) {
+        items = parseSearchHtml(html);
+      }
     } catch (e) {
       lastErr = e;
     }
   }
+
+  // Fallback: filtrar directorio por título (mismo origen que Discover)
+  try {
+    var filtered = [];
+    var qLower = q.toLowerCase();
+    for (var page = 1; page <= 3 && filtered.length < 30; page++) {
+      var data = await fetchDirectorioPage(page, {});
+      var all = directorioItemsToContent(data);
+      for (var j = 0; j < all.length; j++) {
+        var it = all[j];
+        var t = String(it.title || '').toLowerCase();
+        if (t.indexOf(qLower) >= 0) filtered.push(it);
+      }
+    }
+    // si la query es corta, también por letra
+    if (!filtered.length && q.length === 1) {
+      var dataL = await fetchDirectorioPage(1, { letra: q.toUpperCase() });
+      filtered = directorioItemsToContent(dataL);
+    }
+    if (filtered.length) return filtered;
+  } catch (e2) {
+    lastErr = lastErr || e2;
+  }
+
   if (lastErr) throw lastErr;
   return [];
 }
@@ -883,7 +962,7 @@ async function fetchEpisodesAjax(animeId, slug, csrf, cookieHeader) {
   var all = [];
   var page = 1;
   var total = 0;
-  var maxPages = 50;
+  var maxPages = 8;
 
   while (page <= maxPages) {
     var url = baseUrl() + '/ajax/episodes/' + animeId + '/' + page;
@@ -943,13 +1022,51 @@ async function fetchEpisodesAjax(animeId, slug, csrf, cookieHeader) {
 }
 
 async function getMeta(id, extra) {
+  try {
+    return await getMetaInner(id, extra);
+  } catch (e) {
+    var sid = '';
+    try {
+      if (typeof id === 'string') sid = id;
+      else if (id && id.id) sid = String(id.id);
+    } catch (_) {}
+    var slug = slugFromUrl(sid) || String(sid || 'anime').replace(/^jk:/, '').split(':')[0];
+    return {
+      id: slug,
+      title: slug.replace(/-/g, ' ') || 'Anime',
+      poster: CDN + '/assets/images/animes/image/' + slug + '.jpg',
+      backdrop: CDN + '/assets/images/animes/image/' + slug + '.jpg',
+      type: 'series',
+      overview: 'Error al cargar ficha: ' + String(e && e.message ? e.message : e),
+      genres: [],
+      seasons: [
+        {
+          number: 1,
+          name: 'Temporada 1',
+          episodes: [
+            {
+              number: 1,
+              id: baseUrl() + '/' + slug + '/1/',
+              title: 'Capítulo 1',
+            },
+          ],
+        },
+      ],
+      extra: { slug: slug, error: String(e && e.message ? e.message : e) },
+    };
+  }
+}
+
+async function getMetaInner(id, extra) {
   var url = '';
   var slug = '';
 
   function resolveFromString(s) {
     s = String(s || '').trim();
     if (!s) return;
-    try { s = decodeURIComponent(s); } catch (_) {}
+    try {
+      s = decodeURIComponent(s);
+    } catch (_) {}
     if (/^https?:\/\//i.test(s)) {
       url = s;
       slug = slugFromUrl(s);
@@ -960,12 +1077,13 @@ async function getMeta(id, extra) {
       url = baseUrl() + '/' + slug + '/';
       return;
     }
-    slug = s.replace(/^\/+|\/+$/g, '');
-    if (slug.indexOf('jkanime.net/') >= 0) {
-      url = absUrl(slug);
+    // "jkanime.net/slug" sin esquema
+    if (s.indexOf('jkanime.net/') >= 0) {
+      url = absUrl(s.indexOf('http') === 0 ? s : 'https://' + s.replace(/^\/\//, ''));
       slug = slugFromUrl(url);
       return;
     }
+    slug = s.replace(/^\/+|\/+$/g, '');
     if (slug.indexOf('/') >= 0) {
       var segs = slug.split('/').filter(Boolean);
       slug = segs[segs.length - 1];
@@ -991,38 +1109,47 @@ async function getMeta(id, extra) {
     else if (extra.slug) resolveFromString(extra.slug);
   }
 
-  if (!url) {
+  if (!url || !slug) {
     return {
       id: String(id || 'unknown'),
       title: 'Sin título',
       type: 'series',
-      overview: 'No se pudo resolver el enlace del anime.',
+      overview: 'No se pudo resolver el id del anime.',
       poster: '',
       seasons: [],
       extra: {},
     };
   }
   if (!/\/$/.test(url)) url += '/';
-  if (!slug) slug = slugFromUrl(url);
 
   var html = '';
   try {
     html = await fetchHtml(url);
   } catch (e) {
+    // Ficha mínima con 1 capítulo para que la app NO muestre "No encontrado"
     return {
-      id: slug || url,
-      title: slug ? slug.replace(/-/g, ' ') : 'Anime',
+      id: url || slug,
+      title: slug.replace(/-/g, ' '),
       poster: CDN + '/assets/images/animes/image/' + slug + '.jpg',
       backdrop: CDN + '/assets/images/animes/image/' + slug + '.jpg',
       type: 'series',
-      overview: 'No se pudo cargar la ficha: ' + String(e),
+      overview: 'No se pudo cargar la página del anime (' + String(e && e.message ? e.message : e) + ').',
       genres: [],
-      seasons: [{
-        number: 1,
-        name: 'Temporada 1',
-        episodes: [{ number: 1, id: baseUrl() + '/' + slug + '/1/', title: 'Capítulo 1' }],
-      }],
-      extra: { url: url, link: url, slug: slug, error: String(e) },
+      seasons: [
+        {
+          number: 1,
+          name: 'Temporada 1',
+          episodes: [
+            {
+              number: 1,
+              id: baseUrl() + '/' + slug + '/1/',
+              title: 'Capítulo 1',
+              still: CDN + '/assets/images/animes/image/' + slug + '.jpg',
+            },
+          ],
+        },
+      ],
+      extra: { url: url, link: url, slug: slug, error: String(e && e.message ? e.message : e) },
     };
   }
 
@@ -1032,16 +1159,23 @@ async function getMeta(id, extra) {
   var altTitle = clean($('div.anime_info > span').first().text());
   if (!title) {
     title = clean($('meta[property="og:title"]').attr('content'));
-    title = title.replace(/\s*[—\-–|]\s*Jk?Anime.*$/i, '').replace(/\s*-\s*anime\s+.*$/i, '').trim();
+    title = title
+      .replace(/\s*[—\-–|]\s*Jk?Anime.*$/i, '')
+      .replace(/\s*-\s*anime\s+.*$/i, '')
+      .trim();
   }
   if (!title) {
-    title = clean($('title').text()).replace(/\s*[—\-–|]\s*Jk?Anime.*$/i, '').replace(/\s*-\s*anime\s+.*$/i, '').trim();
+    title = clean($('title').text())
+      .replace(/\s*[—\-–|]\s*Jk?Anime.*$/i, '')
+      .replace(/\s*-\s*anime\s+.*$/i, '')
+      .trim();
   }
   if (!title) title = slug.replace(/-/g, ' ');
 
   var overview = clean($('div.anime_info p.scroll').first().text());
   if (!overview) {
-    overview = clean($('meta[name="description"]').attr('content')) ||
+    overview =
+      clean($('meta[name="description"]').attr('content')) ||
       clean($('meta[property="og:description"]').attr('content')) ||
       clean($('div.anime_info p').first().text());
   }
@@ -1049,29 +1183,49 @@ async function getMeta(id, extra) {
     overview = altTitle + (overview ? '\n' + overview : '');
   }
 
-  var poster = absUrl($('div.anime_pic img').first().attr('src') || $('div.movpic img').first().attr('src') || '');
+  var poster = absUrl(
+    $('div.anime_pic img').first().attr('src') ||
+      $('div.movpic img').first().attr('src') ||
+      ''
+  );
   if (!poster) poster = absUrl($('meta[property="og:image"]').attr('content') || '');
-  if (!poster && slug) poster = CDN + '/assets/images/animes/image/' + slug + '.jpg';
+  if (!poster) poster = CDN + '/assets/images/animes/image/' + slug + '.jpg';
 
-  var type = '', genres = [], studios = [], status = '', episodesCount = '', aired = '', duration = '', rating = null;
+  var type = '';
+  var genres = [];
+  var studios = [];
+  var status = '';
+  var episodesCount = '';
+  var aired = '';
+  var duration = '';
+  var rating = null;
+
   $('div.anime_data ul li, .anime_data li').each(function (_, el) {
     var text = clean($(el).text());
     var span = clean($(el).find('span').first().text()).toLowerCase();
-    var value = text.replace(new RegExp(span.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'), '').replace(/^:/, '').trim();
+    var value = text
+      .replace(new RegExp(span.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'), '')
+      .replace(/^:/, '')
+      .trim();
     if (span.indexOf('tipo') >= 0) type = value;
     else if (span.indexOf('genero') >= 0 || span.indexOf('género') >= 0) {
-      $(el).find('a').each(function (__, a) {
-        var g = clean($(a).text());
-        if (g && genres.indexOf(g) < 0) genres.push(g);
-      });
+      $(el)
+        .find('a')
+        .each(function (__, a) {
+          var g = clean($(a).text());
+          if (g && genres.indexOf(g) < 0) genres.push(g);
+        });
     } else if (span.indexOf('estudio') >= 0 || span.indexOf('studios') >= 0) {
-      $(el).find('a').each(function (__, a) {
-        var st = clean($(a).text());
-        if (st) studios.push(st);
-      });
+      $(el)
+        .find('a')
+        .each(function (__, a) {
+          var st = clean($(a).text());
+          if (st) studios.push(st);
+        });
       if (!studios.length && value) studios.push(value);
-    } else if (span.indexOf('estado') >= 0) status = clean($(el).find('div').text()) || value;
-    else if (span.indexOf('episodio') >= 0) episodesCount = value;
+    } else if (span.indexOf('estado') >= 0) {
+      status = clean($(el).find('div').text()) || value;
+    } else if (span.indexOf('episodio') >= 0) episodesCount = value;
     else if (span.indexOf('emitido') >= 0) aired = value;
     else if (span.indexOf('duracion') >= 0 || span.indexOf('duración') >= 0) duration = value;
     else if (span.indexOf('puntu') >= 0) {
@@ -1079,6 +1233,7 @@ async function getMeta(id, extra) {
       if (!isNaN(pr)) rating = pr;
     }
   });
+
   if (!genres.length) {
     $('a[href*="/genero/"]').each(function (_, el) {
       var t = clean($(el).text());
@@ -1086,31 +1241,72 @@ async function getMeta(id, extra) {
     });
   }
 
-  var csrf = $('meta[name="csrf-token"]').attr('content') || (html.match(/name="csrf-token"\s+content="([^"]+)"/i) || [])[1] || '';
-  var animeId = $('[data-anime]').attr('data-anime') || (html.match(/data-anime="(\d+)"/i) || [])[1] || '';
+  var csrf =
+    $('meta[name="csrf-token"]').attr('content') ||
+    (html.match(/name="csrf-token"\s+content="([^"]+)"/i) || [])[1] ||
+    '';
+  var animeId =
+    $('[data-anime]').attr('data-anime') ||
+    (html.match(/data-anime="(\d+)"/i) || [])[1] ||
+    '';
 
+  // Capítulos: primero del contador HTML (Episodios: 11), luego AJAX
   var episodes = [];
-  if (animeId && csrf) {
-    try { episodes = await fetchEpisodesAjax(animeId, slug, csrf, ''); } catch (_) {}
+  var totalEps = parseInt(String(episodesCount).replace(/\D/g, ''), 10) || 0;
+  if (!totalEps) {
+    var em =
+      html.match(/Episodios:<\/span>\s*(\d+)/i) ||
+      html.match(/Episodios:<\/span>\s*([^<]+)/i);
+    if (em) totalEps = parseInt(String(em[1]).replace(/\D/g, ''), 10) || 0;
   }
+  if (totalEps > 0 && totalEps < 2000) {
+    for (var i = 1; i <= totalEps; i++) {
+      episodes.push({
+        number: i,
+        id: baseUrl() + '/' + slug + '/' + i + '/',
+        title: 'Capítulo ' + i,
+        still: poster,
+      });
+    }
+  }
+
+  if (animeId && csrf) {
+    try {
+      var ajaxEps = await fetchEpisodesAjax(animeId, slug, csrf, __cookieJar);
+      if (ajaxEps && ajaxEps.length) episodes = ajaxEps;
+    } catch (_) {}
+  }
+
   if (!episodes.length) {
-    var seenEp = {}, re = new RegExp('/' + slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/(\\d+)/?', 'g'), mm;
+    var seenEp = {};
+    var re = new RegExp(
+      '/' + slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/(\\d+)/?',
+      'g'
+    );
+    var mm;
     while ((mm = re.exec(html)) !== null) {
       var num = parseInt(mm[1], 10);
       if (!num || seenEp[num]) continue;
       seenEp[num] = true;
-      episodes.push({ number: num, id: baseUrl() + '/' + slug + '/' + num + '/', title: 'Capítulo ' + num, still: poster });
+      episodes.push({
+        number: num,
+        id: baseUrl() + '/' + slug + '/' + num + '/',
+        title: 'Capítulo ' + num,
+        still: poster,
+      });
     }
-    episodes.sort(function (a, b) { return a.number - b.number; });
+    episodes.sort(function (a, b) {
+      return a.number - b.number;
+    });
   }
-  if (!episodes.length && episodesCount) {
-    var total = parseInt(String(episodesCount).replace(/\D/g, ''), 10) || 0;
-    for (var i = 1; i <= Math.min(total, 2000); i++) {
-      episodes.push({ number: i, id: baseUrl() + '/' + slug + '/' + i + '/', title: 'Capítulo ' + i, still: poster });
-    }
-  }
-  if (!episodes.length && slug) {
-    episodes.push({ number: 1, id: baseUrl() + '/' + slug + '/1/', title: 'Capítulo 1', still: poster });
+
+  if (!episodes.length) {
+    episodes.push({
+      number: 1,
+      id: baseUrl() + '/' + slug + '/1/',
+      title: 'Capítulo 1',
+      still: poster,
+    });
   }
 
   var overviewParts = [];
@@ -1122,8 +1318,8 @@ async function getMeta(id, extra) {
   if (studios.length) overviewParts.push('Estudio: ' + studios.join(', '));
 
   return {
-    id: slug || url,
-    title: title || slug || 'Anime',
+    id: url,
+    title: title || slug,
     poster: poster,
     backdrop: poster,
     type: 'series',
@@ -1131,10 +1327,25 @@ async function getMeta(id, extra) {
     genres: genres,
     year: (aired.match(/\d{4}/) || [])[0] || '',
     rating: rating,
-    seasons: [{ number: 1, name: 'Temporada 1', episodes: episodes }],
-    extra: { url: url, link: url, slug: slug, animeId: animeId, status: status, tipo: type, studios: studios },
+    seasons: [
+      {
+        number: 1,
+        name: 'Temporada 1',
+        episodes: episodes,
+      },
+    ],
+    extra: {
+      url: url,
+      link: url,
+      slug: slug,
+      animeId: animeId,
+      status: status,
+      tipo: type,
+      studios: studios,
+    },
   };
 }
+
 
 // ───────────────────── STREAMS ─────────────────────
 
