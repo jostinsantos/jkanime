@@ -703,13 +703,13 @@ async function search(query) {
   var q = clean(query);
   if (!q) return [];
 
-  // Como BuscarApi de tu lib: https://jkanime.net/buscar/{encodeURIComponent(q)}
   var encoded = encodeURIComponent(q);
   var pathPlus = encoded.replace(/%20/g, '+');
   var urls = [
     baseUrl() + '/buscar/' + encoded,
     baseUrl() + '/buscar/' + pathPlus,
     baseUrl() + '/buscar/' + encoded + '/',
+    baseUrl() + '/buscar?q=' + encoded,
   ];
 
   var lastErr = null;
@@ -718,30 +718,78 @@ async function search(query) {
       var html = await fetchHtml(urls[i]);
       var items = parseSearchHtml(html);
       if (items.length) return items;
-      // a veces el HTML viene sin page_directorio pero con anime__item
-      if (!items.length) {
-        items = parseSearchHtml(html);
-      }
     } catch (e) {
       lastErr = e;
     }
   }
 
-  // Fallback: filtrar directorio por título (mismo origen que Discover)
+  // ajax_search (form data-ajax)
   try {
-    var filtered = [];
+    var aj = await fetchPost(
+      baseUrl() + '/ajax_search',
+      'q=' + encoded,
+      pageHeaders({
+        Accept: 'application/json, text/javascript, */*; q=0.01',
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest',
+        Origin: baseUrl(),
+        Referer: baseUrl() + '/',
+      })
+    );
+    if (aj.status === 200 && aj.text) {
+      var parsed = null;
+      try {
+        parsed = JSON.parse(aj.text);
+      } catch (_) {}
+      if (parsed) {
+        var list = Array.isArray(parsed) ? parsed : parsed.data || parsed.results || parsed.animes || [];
+        if (Array.isArray(list) && list.length) {
+          return directorioItemsToContent({ data: list });
+        }
+      }
+      // a veces devuelve HTML parcial
+      var itemsAj = parseSearchHtml(aj.text);
+      if (itemsAj.length) return itemsAj;
+    }
+  } catch (eAj) {
+    lastErr = lastErr || eAj;
+  }
+
+  // Fallback: directorio multi-página + match flexible de título/slug
+  try {
     var qLower = q.toLowerCase();
-    for (var page = 1; page <= 3 && filtered.length < 30; page++) {
+    var words = qLower.split(/\s+/).filter(function (w) { return w.length > 1; });
+    if (!words.length) words = [qLower];
+    var filtered = [];
+    var seen = {};
+    for (var page = 1; page <= 8 && filtered.length < 40; page++) {
       var data = await fetchDirectorioPage(page, {});
       var all = directorioItemsToContent(data);
       for (var j = 0; j < all.length; j++) {
         var it = all[j];
         var t = String(it.title || '').toLowerCase();
-        if (t.indexOf(qLower) >= 0) filtered.push(it);
+        var slug = String((it.extra && it.extra.slug) || it.id || '').toLowerCase();
+        var ok = t.indexOf(qLower) >= 0 || slug.indexOf(qLower) >= 0;
+        if (!ok) {
+          ok = words.every(function (w) {
+            return t.indexOf(w) >= 0 || slug.indexOf(w) >= 0;
+          });
+        }
+        // anohana ~ ano hana / hana no namae
+        if (!ok && qLower.length >= 4) {
+          ok = t.replace(/\s+/g, '').indexOf(qLower.replace(/\s+/g, '')) >= 0;
+        }
+        if (ok) {
+          var key = it.id || t;
+          if (!seen[key]) {
+            seen[key] = true;
+            filtered.push(it);
+          }
+        }
       }
     }
-    // si la query es corta, también por letra
-    if (!filtered.length && q.length === 1) {
+    // letra
+    if (!filtered.length && /^[a-zA-Z]$/.test(q)) {
       var dataL = await fetchDirectorioPage(1, { letra: q.toUpperCase() });
       filtered = directorioItemsToContent(dataL);
     }
@@ -962,7 +1010,7 @@ async function fetchEpisodesAjax(animeId, slug, csrf, cookieHeader) {
   var all = [];
   var page = 1;
   var total = 0;
-  var maxPages = 8;
+  var maxPages = 200;
 
   while (page <= maxPages) {
     var url = baseUrl() + '/ajax/episodes/' + animeId + '/' + page;
@@ -1253,11 +1301,19 @@ async function getMetaInner(id, extra) {
   // Capítulos: primero del contador HTML (Episodios: 11), luego AJAX
   var episodes = [];
   var totalEps = parseInt(String(episodesCount).replace(/\D/g, ''), 10) || 0;
+  // Siempre intentar del HTML crudo (más fiable que cheerio)
+  var emHtml =
+    html.match(/Episodios:<\/span>\s*(\d+)/i) ||
+    html.match(/<span>Episodios:<\/span>\s*(\d+)/i) ||
+    html.match(/Episodios:<\/span>\s*([^<]{1,12})/i);
+  if (emHtml) {
+    var nHtml = parseInt(String(emHtml[1]).replace(/\D/g, ''), 10) || 0;
+    if (nHtml > totalEps) totalEps = nHtml;
+  }
+  // data-anime page scripts a veces tienen total en pagination
   if (!totalEps) {
-    var em =
-      html.match(/Episodios:<\/span>\s*(\d+)/i) ||
-      html.match(/Episodios:<\/span>\s*([^<]+)/i);
-    if (em) totalEps = parseInt(String(em[1]).replace(/\D/g, ''), 10) || 0;
+    var emTot = html.match(/paginationEps\((\d+)\)/) || html.match(/["']total["']\s*:\s*(\d+)/);
+    if (emTot) totalEps = parseInt(emTot[1], 10) || 0;
   }
   if (totalEps > 0 && totalEps < 2000) {
     for (var i = 1; i <= totalEps; i++) {
@@ -1270,10 +1326,26 @@ async function getMetaInner(id, extra) {
     }
   }
 
+  // AJAX solo si trae MÁS o IGUAL episodios que el contador (no pisar con 1)
   if (animeId && csrf) {
     try {
       var ajaxEps = await fetchEpisodesAjax(animeId, slug, csrf, __cookieJar);
-      if (ajaxEps && ajaxEps.length) episodes = ajaxEps;
+      if (ajaxEps && ajaxEps.length) {
+        if (!episodes.length || ajaxEps.length >= episodes.length) {
+          episodes = ajaxEps;
+        } else {
+          // mezclar: usar thumbs del ajax cuando existan
+          var byNum = {};
+          for (var ai = 0; ai < ajaxEps.length; ai++) {
+            byNum[ajaxEps[ai].number] = ajaxEps[ai];
+          }
+          for (var ei = 0; ei < episodes.length; ei++) {
+            if (byNum[episodes[ei].number]) {
+              episodes[ei] = byNum[episodes[ei].number];
+            }
+          }
+        }
+      }
     } catch (_) {}
   }
 
