@@ -1,142 +1,193 @@
 /**
- * JKAnime repo para Nuvio / app de repos.
- * Métodos: getHome, getDiscover, getDiscoverFilters, search, getMeta, getStreams, getNews
- * Usa cheerio (globalThis.__cheerio) y fetch puenteado por la app.
+ * JKAnime repo — adaptado del scraper de tu app.
+ * Headers y parseo iguales a lib/scraper (home, buscar, directorio, servidores).
+ * Detecta challenge de Cloudflare y falla con mensaje claro.
  */
 
-const BASE = 'https://jkanime.net';
-const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
+var BASE = 'https://jkanime.net';
+var UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
+
+function getCheerio() {
+  try {
+    if (typeof require === 'function') {
+      var c = require('cheerio');
+      if (c && typeof c.load === 'function') return c;
+      if (c && c.default && typeof c.default.load === 'function') return c.default;
+    }
+  } catch (_) {}
+  if (globalThis.__cheerio && typeof globalThis.__cheerio.load === 'function') {
+    return globalThis.__cheerio;
+  }
+  throw new Error('cheerio no disponible — el runtime no cargó cheerio');
+}
 
 function cfg(key, fallback) {
   try {
-    const c =
+    var c =
       (globalThis.__nuvioConfig &&
-        (globalThis.__nuvioConfig.current || globalThis.__nuvioConfig.jkanime)) ||
+        (globalThis.__nuvioConfig.current ||
+          globalThis.__nuvioConfig.jkanime)) ||
       {};
-    const v = c[key];
-    if (v != null && String(v).trim() !== '') return String(v).trim();
+    if (c[key] != null && String(c[key]).trim() !== '') return String(c[key]).trim();
   } catch (_) {}
   return fallback;
 }
 
 function baseUrl() {
-  const u = cfg('baseUrl', BASE).replace(/\/+$/, '');
-  return u || BASE;
+  return (cfg('baseUrl', BASE) || BASE).replace(/\/+$/, '');
 }
 
-async function fetchHtml(url) {
-  const res = await fetch(url, {
-    headers: {
-      'User-Agent': UA,
-      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'es-ES,es;q=0.9',
-      Referer: baseUrl() + '/',
-    },
-  });
-  if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + url);
-  return await res.text();
-}
-
-function cheerioLoad(html) {
-  const c = globalThis.__cheerio;
-  if (!c || typeof c.load !== 'function') {
-    throw new Error('cheerio no disponible en el runtime');
+/** Headers idénticos a tu BuscarApi / DirectorioApi / JkAnimeApi */
+function pageHeaders(extra) {
+  var h = {
+    'User-Agent': UA,
+    Accept:
+      'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'es-ES,es;q=0.9',
+    Referer: baseUrl() + '/',
+    'Accept-Encoding': 'gzip, deflate',
+    Connection: 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+  };
+  if (extra) {
+    for (var k in extra) if (Object.prototype.hasOwnProperty.call(extra, k)) h[k] = extra[k];
   }
-  return c.load(html);
+  return h;
+}
+
+function isCloudflareChallenge(html, status) {
+  if (status === 403 || status === 503) return true;
+  if (!html || typeof html !== 'string') return false;
+  var s = html.slice(0, 2500).toLowerCase();
+  return (
+    s.indexOf('just a moment') >= 0 ||
+    s.indexOf('cf-mitigated') >= 0 ||
+    s.indexOf('challenge-platform') >= 0 ||
+    s.indexOf('cdn-cgi/challenge') >= 0 ||
+    s.indexOf('enable javascript and cookies') >= 0
+  );
+}
+
+async function fetchHtml(url, headers) {
+  var res = await fetch(url, {
+    method: 'GET',
+    headers: headers || pageHeaders(),
+    redirect: 'follow',
+  });
+  var text = '';
+  try {
+    text = await res.text();
+  } catch (e) {
+    throw new Error('No se pudo leer body de ' + url + ': ' + e);
+  }
+  if (isCloudflareChallenge(text, res.status)) {
+    throw new Error(
+      'Cloudflare bloqueó la petición a jkanime (status ' +
+        res.status +
+        '). En el dispositivo suele pasar si la IP/red está marcada. ' +
+        'Prueba otra red o VPN. URL: ' +
+        url
+    );
+  }
+  if (!res.ok) {
+    throw new Error('HTTP ' + res.status + ' en ' + url);
+  }
+  return text;
 }
 
 function absUrl(href) {
   if (!href) return '';
   href = String(href).trim();
-  if (href.startsWith('//')) return 'https:' + href;
-  if (href.startsWith('http')) return href;
-  if (href.startsWith('/')) return baseUrl() + href;
+  if (href.indexOf('//') === 0) return 'https:' + href;
+  if (/^https?:\/\//i.test(href)) return href;
+  if (href.charAt(0) === '/') return baseUrl() + href;
   return baseUrl() + '/' + href;
 }
 
 function slugFromUrl(url) {
   if (!url) return '';
   try {
-    const u = url.replace(/\/+$/, '');
-    const parts = u.split('/').filter(Boolean);
-    // .../anime-slug/ o .../anime-slug/12/
-    const last = parts[parts.length - 1];
-    if (/^\d+$/.test(last) && parts.length >= 2) return parts[parts.length - 2];
+    var u = String(url).replace(/\/+$/, '');
+    var path = u.replace(/^https?:\/\/[^/]+/i, '');
+    var segs = path.split('/').filter(Boolean);
+    if (!segs.length) return '';
+    var last = segs[segs.length - 1];
+    if (/^\d+$/.test(last) && segs.length >= 2) return segs[segs.length - 2];
     return last;
   } catch (_) {
-    return url;
+    return '';
   }
 }
 
 function idFromUrl(url) {
-  const slug = slugFromUrl(url);
-  return slug ? 'jk:' + slug : url;
+  var slug = slugFromUrl(url);
+  return slug ? 'jk:' + slug : String(url || '');
 }
 
-function episodeId(animeSlug, ep) {
-  return 'jk:' + animeSlug + ':' + ep;
+function episodeId(slug, ep) {
+  return 'jk:' + slug + ':' + ep;
 }
 
-function itemFromCard($, el, overrides) {
-  const $el = $(el);
-  const a = $el.find('a').first();
-  let href = a.attr('href') || $el.attr('href') || '';
-  href = absUrl(href);
-  const img =
-    a.find('img').attr('src') ||
-    $el.find('img').attr('src') ||
-    $el.attr('data-setbg') ||
-    '';
-  const title =
-    $el.find('h2, h5.card-title, h5, .card-title').first().text().trim() ||
-    a.attr('title') ||
-    a.find('img').attr('alt') ||
-    '';
-  const status =
-    $el.find('.badge, .ainfo span, .card-info p').first().text().trim() || '';
-  const type =
-    $el.find('.ainfo span').eq(0).text().trim() ||
-    $el.find('.badge').eq(0).text().trim() ||
-    'series';
+function clean(t) {
+  if (t == null) return '';
+  return String(t).replace(/\s+/g, ' ').trim();
+}
 
-  const id = idFromUrl(href);
-  return Object.assign(
-    {
-      id: id,
-      title: title || 'Sin título',
-      poster: absUrl(img),
-      backdrop: absUrl(img),
-      type: 'series',
-      overview: status,
-      year: '',
-      genres: type ? [type] : [],
-      extra: { url: href, source: 'jkanime' },
-    },
-    overrides || {}
-  );
+function fixHost(u) {
+  if (!u) return u;
+  return String(u)
+    .replace(/https?:\/\/sfastwish\.com\//gi, 'https://flaswish.com/')
+    .replace(/https?:\/\/vidhidevip\.com\//gi, 'https://callistanise.com/');
+}
+
+function b64decode(str) {
+  try {
+    if (typeof atob === 'function') return atob(str);
+  } catch (_) {}
+  try {
+    if (typeof Buffer !== 'undefined') return Buffer.from(str, 'base64').toString('utf8');
+  } catch (_) {}
+  var chars =
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+  var output = '';
+  str = String(str).replace(/[=]+$/, '');
+  if (str.length % 4 === 1) return '';
+  for (
+    var bc = 0, bs, buffer, idx = 0;
+    (buffer = str.charAt(idx++));
+    ~buffer &&
+    ((bs = bc % 4 ? bs * 64 + buffer : buffer), bc++ % 4)
+      ? (output += String.fromCharCode(255 & (bs >> ((-2 * bc) & 6))))
+      : 0
+  ) {
+    buffer = chars.indexOf(buffer);
+  }
+  return output;
 }
 
 // ───────────────────── HOME ─────────────────────
 
 async function getHome() {
-  const html = await fetchHtml(baseUrl() + '/');
-  const $ = cheerioLoad(html);
-  const rows = [];
+  var html = await fetchHtml(baseUrl() + '/');
+  var $ = getCheerio().load(html);
+  var rows = [];
 
-  // Hero
-  const heroItems = [];
-  $('div.hero__items').each((_, el) => {
-    const $el = $(el);
-    const image = absUrl($el.attr('data-setbg') || '');
-    const type = $el.find('div.ainfo span').eq(0).text().trim();
-    const status = $el.find('div.ainfo span').eq(1).text().trim();
-    const title = $el.find('h2').text().trim();
-    const desc = $el.find('p').text().trim();
-    const links = $el.find('div.slider-btns a');
-    const detailsUrl = absUrl(links.eq(0).attr('href') || '');
+  var heroItems = [];
+  $('div.hero__items').each(function (_, el) {
+    var $el = $(el);
+    var image = absUrl($el.attr('data-setbg') || '');
+    var spans = $el.find('div.ainfo span');
+    var type = clean(spans.eq(0).text());
+    var status = clean(spans.eq(1).text());
+    var title = clean($el.find('h2').text());
+    var desc = clean($el.find('p').text());
+    var links = $el.find('div.slider-btns a');
+    var detailsUrl = absUrl(links.eq(0).attr('href') || '');
+    if (!title && !detailsUrl) return;
     heroItems.push({
-      id: idFromUrl(detailsUrl),
+      id: idFromUrl(detailsUrl) || 'jk:hero-' + heroItems.length,
       title: title || 'Destacado',
       poster: image,
       backdrop: image,
@@ -156,44 +207,67 @@ async function getHome() {
     });
   }
 
-  // Horario / recientes por pestaña
-  const scheduleTabs = [
-    { id: 'animes', title: 'Últimos animes' },
-    { id: 'donghuas', title: 'Donghuas' },
-    { id: 'ovas', title: 'OVAs' },
-  ];
-  for (const tab of scheduleTabs) {
-    const items = [];
-    $('#' + tab.id + ' div.card').each((_, el) => {
-      const it = itemFromCard($, el);
-      const ep = $(el).find('div.badges span.badge').first().text().trim();
-      if (ep) it.extra = Object.assign({}, it.extra, { episode: ep });
-      if (it.id) items.push(it);
+  function scheduleTab(tabId, title) {
+    var items = [];
+    $('#' + tabId + ' div.card').each(function (_, el) {
+      var $card = $(el);
+      var link = $card.find('a').first();
+      var href = absUrl(link.attr('href') || '');
+      if (!href) return;
+      var img = absUrl(link.find('img').attr('src') || '');
+      var alt = clean(link.find('img').attr('alt') || '');
+      var badges = $card.find('div.badges span.badge');
+      var episode = clean(badges.eq(0).text());
+      var date = clean(badges.eq(1).text());
+      var t = clean($card.find('h5.card-title, .card-title, h5').first().text()) || alt;
+      items.push({
+        id: idFromUrl(href),
+        title: t || 'Anime',
+        poster: img,
+        backdrop: img,
+        type: 'series',
+        overview: episode || date,
+        extra: { url: href, episode: episode, date: date },
+      });
     });
     if (items.length) {
       rows.push({
-        id: 'schedule_' + tab.id,
-        title: tab.title,
+        id: 'schedule_' + tabId,
+        title: title,
         type: 'row',
         imageStyle: 'poster',
         items: items,
       });
     }
   }
+  scheduleTab('animes', 'Últimos animes');
+  scheduleTab('donghuas', 'Donghuas');
+  scheduleTab('ovas', 'OVAs');
 
-  // Top / ranking
   function extractTop(rowClass, title) {
-    const items = [];
-    const seen = {};
+    var items = [];
+    var seen = {};
     $('div.row.' + rowClass + ', div.' + rowClass)
       .find('div.toplist')
-      .each((_, el) => {
-        const it = itemFromCard($, el);
-        if (!it.id || seen[it.id]) return;
-        seen[it.id] = true;
-        const rank = $(el).find('div[data-rank] span').text().trim();
-        if (rank) it.extra = Object.assign({}, it.extra, { rank: rank });
-        items.push(it);
+      .each(function (_, el) {
+        var $card = $(el);
+        var link = $card.find('a').first();
+        var href = absUrl(link.attr('href') || '');
+        if (!href) return;
+        var id = idFromUrl(href);
+        if (seen[id]) return;
+        seen[id] = true;
+        var img = absUrl(link.find('img').attr('src') || '');
+        var t = clean($card.find('h5.card-title').text()) || clean(link.find('img').attr('alt') || '');
+        var rank = clean($card.find('div[data-rank] span').text());
+        items.push({
+          id: id,
+          title: t || 'Anime',
+          poster: img,
+          backdrop: img,
+          type: 'series',
+          extra: { url: href, rank: rank },
+        });
       });
     if (items.length) {
       rows.push({
@@ -208,19 +282,18 @@ async function getHome() {
   extractTop('upto', 'Top animes');
   extractTop('lower', 'Más populares');
 
-  // Sidebar recientes
-  const recent = [];
-  $('div.trending_div div.p-3.d-flex').each((_, el) => {
-    const $el = $(el);
-    const a = $el.find('div.custom_thumb_home a').first();
-    const href = absUrl(a.attr('href') || '');
-    const img = absUrl(a.find('img').attr('src') || '');
-    const title = $el.find('h5.card-title a').text().trim();
-    const status = $el.find('div.card-info p').first().text().trim();
+  var recent = [];
+  $('div.trending_div div.p-3.d-flex').each(function (_, el) {
+    var $el = $(el);
+    var a = $el.find('div.custom_thumb_home a').first();
+    var href = absUrl(a.attr('href') || '');
     if (!href) return;
+    var img = absUrl(a.find('img').attr('src') || '');
+    var t = clean($el.find('h5.card-title a').text());
+    var status = clean($el.find('div.card-info p').first().text());
     recent.push({
       id: idFromUrl(href),
-      title: title || 'Anime',
+      title: t || 'Anime',
       poster: img,
       backdrop: img,
       type: 'series',
@@ -238,44 +311,54 @@ async function getHome() {
     });
   }
 
+  if (!rows.length) {
+    throw new Error(
+      'Home vacío: el HTML no tiene hero/cards. Posible bloqueo o layout distinto. len=' +
+        html.length
+    );
+  }
   return rows;
 }
 
-// ───────────────────── NEWS / NOVEDADES ─────────────────────
+// ───────────────────── NEWS ─────────────────────
 
 async function getNews() {
-  const html = await fetchHtml(baseUrl() + '/');
-  const $ = cheerioLoad(html);
-  const items = [];
-  const seen = {};
+  var html = await fetchHtml(baseUrl() + '/');
+  var $ = getCheerio().load(html);
+  var items = [];
+  var seen = {};
 
-  // Priorizar últimos episodios del home
-  $('#animes div.card, #donghuas div.card').each((_, el) => {
-    const it = itemFromCard($, el);
-    if (!it.id || seen[it.id]) return;
-    seen[it.id] = true;
-    const ep = $(el).find('div.badges span.badge').first().text().trim();
+  $('#animes div.card, #donghuas div.card, #ovas div.card').each(function (_, el) {
+    var $card = $(el);
+    var link = $card.find('a').first();
+    var href = absUrl(link.attr('href') || '');
+    if (!href) return;
+    var id = idFromUrl(href);
+    if (seen[id]) return;
+    seen[id] = true;
+    var img = absUrl(link.find('img').attr('src') || '');
+    var t =
+      clean($card.find('h5.card-title, .card-title, h5').first().text()) ||
+      clean(link.find('img').attr('alt') || '');
+    var ep = clean($card.find('div.badges span.badge').first().text());
     items.push({
-      id: it.id,
-      title: it.title + (ep ? ' · ' + ep : ''),
-      poster: it.poster,
-      backdrop: it.backdrop,
+      id: id,
+      title: t + (ep ? ' · ' + ep : ''),
+      poster: img,
+      backdrop: img,
       type: 'series',
-      overview: ep || it.overview || 'Nuevo episodio',
-      date: '',
-      extra: it.extra,
+      overview: ep || 'Nuevo',
+      extra: { url: href, episode: ep },
     });
   });
 
-  // Fallback: hero
-  if (items.length < 5) {
-    $('div.hero__items').each((_, el) => {
-      const $el = $(el);
-      const title = $el.find('h2').text().trim();
-      const image = absUrl($el.attr('data-setbg') || '');
-      const links = $el.find('div.slider-btns a');
-      const detailsUrl = absUrl(links.eq(0).attr('href') || '');
-      const id = idFromUrl(detailsUrl);
+  if (!items.length) {
+    $('div.hero__items').each(function (_, el) {
+      var $el = $(el);
+      var title = clean($el.find('h2').text());
+      var image = absUrl($el.attr('data-setbg') || '');
+      var detailsUrl = absUrl($el.find('div.slider-btns a').eq(0).attr('href') || '');
+      var id = idFromUrl(detailsUrl);
       if (!id || seen[id]) return;
       seen[id] = true;
       items.push({
@@ -284,86 +367,65 @@ async function getNews() {
         poster: image,
         backdrop: image,
         type: 'series',
-        overview: $el.find('p').text().trim() || 'Destacado',
+        overview: clean($el.find('p').text()),
         extra: { url: detailsUrl },
       });
     });
   }
-
   return items;
 }
 
 // ───────────────────── SEARCH ─────────────────────
 
 async function search(query) {
-  const q = String(query || '').trim();
+  var q = clean(query);
   if (!q) return [];
-  const url = baseUrl() + '/buscar/' + encodeURIComponent(q);
-  const html = await fetchHtml(url);
-  const $ = cheerioLoad(html);
-  const items = [];
-  const seen = {};
+  var url = baseUrl() + '/buscar/' + encodeURIComponent(q);
+  var html = await fetchHtml(url);
+  var $ = getCheerio().load(html);
+  var items = [];
+  var seen = {};
 
-  // Resultados típicos de búsqueda JK
-  $('div.anime__item, div.card, div.custom_item, .anime_list a, .row .col-6 a').each(
-    (_, el) => {
-      const $el = $(el);
-      let href = $el.attr('href') || $el.find('a').first().attr('href') || '';
-      href = absUrl(href);
-      if (!href || href.indexOf(baseUrl()) !== 0) return;
-      // Evitar links de navegación
-      if (/\/(genero|letra|directorio|buscar|horario)\//i.test(href)) return;
-      const img =
-        $el.find('img').attr('src') ||
-        $el.find('img').attr('data-src') ||
-        '';
-      const title =
-        $el.find('h5, h6, .title, .card-title').text().trim() ||
-        $el.attr('title') ||
-        $el.find('img').attr('alt') ||
-        '';
-      const status = $el.find('.badge, .status, span').first().text().trim();
-      const id = idFromUrl(href);
-      if (!id || seen[id] || !title) return;
-      seen[id] = true;
-      items.push({
-        id: id,
-        title: title,
-        poster: absUrl(img),
-        backdrop: absUrl(img),
-        type: 'series',
-        overview: status,
-        extra: { url: href },
-      });
+  $('div.page_directorio div.anime__item, div.anime__item').each(function (_, el) {
+    var $item = $(el);
+    var linkNode = $item.find('h5 a').first();
+    if (!linkNode.length) linkNode = $item.find('a[href*="jkanime"]').first();
+    if (!linkNode.length) linkNode = $item.find('a').first();
+
+    var title = clean(linkNode.text());
+    var href = absUrl(linkNode.attr('href') || '');
+    if (!title || !href) return;
+
+    var picNode = $item.find('div.anime__item__pic').first();
+    var image = picNode.attr('data-setbg') || '';
+    if (!image) {
+      var style = picNode.attr('style') || '';
+      var m = /url\(["']?(.*?)["']?\)/i.exec(style);
+      if (m) image = m[1];
     }
-  );
+    if (!image) image = $item.find('img').attr('src') || '';
 
-  // Alternativa: listado con data-setbg / estructura antigua
-  if (items.length === 0) {
-    $('div[class*="anime"], a[href*="jkanime"]').each((_, el) => {
-      const $el = $(el);
-      const href = absUrl($el.attr('href') || $el.find('a').attr('href') || '');
-      if (!href || seen[idFromUrl(href)]) return;
-      const title =
-        $el.find('h5, h2, .title').text().trim() ||
-        $el.attr('title') ||
-        '';
-      if (!title) return;
-      const img = absUrl(
-        $el.find('img').attr('src') || $el.attr('data-setbg') || ''
-      );
-      const id = idFromUrl(href);
-      seen[id] = true;
-      items.push({
-        id: id,
-        title: title,
-        poster: img,
-        backdrop: img,
-        type: 'series',
-        extra: { url: href },
-      });
+    var status = '';
+    var type = '';
+    var lis = $item.find('div.anime__item__text ul li');
+    if (lis.length > 0) status = clean(lis.eq(0).text());
+    if (lis.length > 1) type = clean(lis.eq(1).text());
+
+    var id = idFromUrl(href);
+    if (seen[id]) return;
+    seen[id] = true;
+
+    items.push({
+      id: id,
+      title: title,
+      poster: absUrl(image),
+      backdrop: absUrl(image),
+      type: 'series',
+      overview: status,
+      genres: type ? [type] : [],
+      extra: { url: href, status: status, type: type },
     });
-  }
+  });
 
   return items;
 }
@@ -378,375 +440,349 @@ async function getDiscoverFilters() {
       type: 'select',
       options: [
         { id: '', label: 'Todos' },
-        { id: 'tv', label: 'Anime TV' },
-        { id: 'movie', label: 'Película' },
-        { id: 'ova', label: 'OVA' },
-        { id: 'ona', label: 'ONA' },
-        { id: 'special', label: 'Especial' },
+        { id: 'animes', label: 'Animes' },
+        { id: 'peliculas', label: 'Películas' },
+        { id: 'ovas', label: 'OVAs' },
+        { id: 'onas', label: 'ONAs' },
+        { id: 'especiales', label: 'Especiales' },
       ],
     },
     {
-      id: 'estado',
-      name: 'Estado',
+      id: 'categoria',
+      name: 'Categoría',
       type: 'select',
       options: [
-        { id: '', label: 'Todos' },
-        { id: '1', label: 'En emisión' },
-        { id: '2', label: 'Finalizado' },
+        { id: '', label: 'Todas' },
+        { id: 'donghua', label: 'Donghua' },
+        { id: 'latino', label: 'Latino' },
+      ],
+    },
+    {
+      id: 'filtro',
+      name: 'Ordenar por',
+      type: 'select',
+      options: [
+        { id: '', label: 'Fecha' },
+        { id: 'nombre', label: 'Nombre' },
+        { id: 'popularidad', label: 'Popularidad' },
       ],
     },
     {
       id: 'orden',
-      name: 'Orden',
+      name: 'Dirección',
       type: 'select',
       options: [
-        { id: '', label: 'Por defecto' },
-        { id: 'titulo', label: 'Título' },
-        { id: 'fecha', label: 'Fecha' },
-        { id: 'rating', label: 'Rating' },
+        { id: '', label: 'Desc' },
+        { id: 'asc', label: 'Asc' },
       ],
     },
   ];
 }
 
 function buildDirectorioUrl(page, filters) {
-  // jkanime directorio acepta query params variables; usamos los más comunes
-  const params = [];
-  params.push('p=' + (page || 1));
-  const f = filters || {};
+  var params = [];
+  if (page > 1) params.push('p=' + page);
+  var f = filters || {};
+  if (f.filtro) params.push('filtro=' + encodeURIComponent(f.filtro));
   if (f.tipo) params.push('tipo=' + encodeURIComponent(f.tipo));
-  if (f.estado) params.push('estado=' + encodeURIComponent(f.estado));
+  if (f.categoria) params.push('categoria=' + encodeURIComponent(f.categoria));
+  if (f.genero || f.genre)
+    params.push('genero=' + encodeURIComponent(f.genero || f.genre));
   if (f.orden) params.push('orden=' + encodeURIComponent(f.orden));
-  if (f.genre || f.genero) {
-    params.push('genero=' + encodeURIComponent(f.genre || f.genero));
-  }
-  return baseUrl() + '/directorio/?' + params.join('&');
+  var q = params.length ? '?' + params.join('&') : '';
+  return baseUrl() + '/directorio' + q;
 }
 
 async function getDiscover(opts) {
   opts = opts || {};
-  const page = Number(opts.page) || 1;
-  const filters = Object.assign({}, opts);
-  delete filters.page;
+  var page = Number(opts.page) || 1;
+  var filters = {};
+  ['filtro', 'tipo', 'categoria', 'genero', 'genre', 'orden'].forEach(function (k) {
+    if (opts[k] != null && String(opts[k]) !== '') filters[k] = opts[k];
+  });
+  if (opts.filter && !filters.tipo) filters.tipo = opts.filter;
+  if (opts.genre && !filters.genero) filters.genero = opts.genre;
 
-  const url = buildDirectorioUrl(page, filters);
-  let html;
-  try {
-    html = await fetchHtml(url);
-  } catch (e) {
-    // fallback página simple
-    html = await fetchHtml(baseUrl() + '/directorio/');
-  }
-  const $ = cheerioLoad(html);
-  const items = [];
-  const seen = {};
+  var url = buildDirectorioUrl(page, filters);
+  var html = await fetchHtml(url);
 
-  // Muchas páginas de directorio traen JSON embebido
-  const scripts = $('script').toArray();
-  for (const s of scripts) {
-    const txt = $(s).html() || '';
-    const m = txt.match(/var\s+animes\s*=\s*(\[[\s\S]*?\]);/);
-    if (m) {
-      try {
-        const arr = JSON.parse(m[1]);
-        for (const a of arr) {
-          const slug = a.slug || a.url || a.id || '';
-          const href = absUrl(
-            a.url || (slug ? '/' + String(slug).replace(/^\//, '') + '/' : '')
-          );
-          const id = idFromUrl(href) || 'jk:' + slug;
-          if (seen[id]) continue;
-          seen[id] = true;
-          items.push({
-            id: id,
-            title: a.title || a.nombre || a.name || 'Anime',
-            poster: absUrl(a.image || a.poster || a.img || ''),
-            backdrop: absUrl(a.image || a.poster || a.img || ''),
-            type: 'series',
-            overview: a.synopsis || a.sinopsis || a.description || '',
-            year: String(a.year || a.ano || a.aired || ''),
-            genres: Array.isArray(a.genres)
-              ? a.genres
-              : a.tipo
-                ? [String(a.tipo)]
-                : [],
-            rating: a.rating || a.score || null,
-            extra: { url: href, raw: a },
-          });
-        }
-      } catch (_) {}
+  var match = /var\s+animes\s*=\s*(\{[\s\S]*?\});/i.exec(html);
+  var items = [];
+  var hasMore = false;
+  var lastPage = 1;
+
+  if (match) {
+    try {
+      var decoded = JSON.parse(match[1]);
+      var data = decoded.data || [];
+      lastPage = Number(decoded.last_page) || 1;
+      hasMore = page < lastPage;
+      for (var i = 0; i < data.length; i++) {
+        var a = data[i];
+        if (!a || typeof a !== 'object') continue;
+        var href = absUrl(a.url || '');
+        if (!href && a.slug) href = baseUrl() + '/' + a.slug + '/';
+        var img = absUrl(a.image || a.poster || '');
+        items.push({
+          id: idFromUrl(href) || 'jk:' + (a.id || i),
+          title: a.title || a.short_title || a.name || 'Anime',
+          poster: img,
+          backdrop: img,
+          type: 'series',
+          overview: a.synopsis || a.status || '',
+          genres: a.tipo ? [String(a.tipo)] : [],
+          extra: {
+            url: href,
+            status: a.status || a.estado || '',
+            tipo: a.tipo || '',
+          },
+        });
+      }
+    } catch (e) {
+      throw new Error('JSON animes inválido: ' + e);
     }
   }
 
-  if (items.length === 0) {
-    $('div.anime__item, div.card, a[href*="jkanime.net"]').each((_, el) => {
-      const it = itemFromCard($, el);
-      if (!it.id || seen[it.id]) return;
-      if (/\/(genero|letra|directorio|buscar)\//i.test(it.extra && it.extra.url))
-        return;
-      seen[it.id] = true;
-      items.push(it);
+  if (!items.length) {
+    var $ = getCheerio().load(html);
+    var seen = {};
+    $('div.page_directorio div.anime__item, div.anime__item').each(function (_, el) {
+      var $item = $(el);
+      var linkNode = $item.find('h5 a').first();
+      if (!linkNode.length) linkNode = $item.find('a').first();
+      var title = clean(linkNode.text());
+      var href = absUrl(linkNode.attr('href') || '');
+      if (!title || !href) return;
+      var id = idFromUrl(href);
+      if (seen[id]) return;
+      seen[id] = true;
+      var picNode = $item.find('div.anime__item__pic').first();
+      var image = picNode.attr('data-setbg') || '';
+      if (!image) {
+        var style = picNode.attr('style') || '';
+        var m = /url\(["']?(.*?)["']?\)/i.exec(style);
+        if (m) image = m[1];
+      }
+      items.push({
+        id: id,
+        title: title,
+        poster: absUrl(image),
+        backdrop: absUrl(image),
+        type: 'series',
+        extra: { url: href },
+      });
     });
+    hasMore = items.length >= 20;
   }
 
-  const hasMore = items.length >= 20;
   return { items: items, hasMore: hasMore, page: page };
 }
 
 // ───────────────────── META ─────────────────────
 
 async function getMeta(id, extra) {
-  let url = '';
-  if (typeof id === 'string' && id.startsWith('http')) {
+  var url = '';
+  if (typeof id === 'string' && /^https?:\/\//i.test(id)) {
     url = id;
-  } else if (typeof id === 'string' && id.startsWith('jk:')) {
-    const rest = id.slice(3);
-    // jk:slug o jk:slug:12
-    const parts = rest.split(':');
-    const slug = parts[0];
-    url = baseUrl() + '/' + slug + '/';
+  } else if (typeof id === 'string' && id.indexOf('jk:') === 0) {
+    var rest = id.slice(3);
+    var parts = rest.split(':');
+    url = baseUrl() + '/' + parts[0] + '/';
   } else {
     url = absUrl(String(id));
   }
+  if (!/\/$/.test(url)) url += '/';
 
-  const html = await fetchHtml(url);
-  const $ = cheerioLoad(html);
+  var html = await fetchHtml(url);
+  var $ = getCheerio().load(html);
 
-  const title =
-    $('h1').first().text().trim() ||
-    $('meta[property="og:title"]').attr('content') ||
-    $('title').text().trim();
-  const poster =
-    absUrl(
-      $('meta[property="og:image"]').attr('content') ||
-        $('.anime_info img, .poster img, .sinopsis img').first().attr('src') ||
-        ''
-    );
-  const overview =
-    $('meta[property="og:description"]').attr('content') ||
-    $('.sinopsis p, .anime_info p, .description').first().text().trim() ||
-    '';
-  const genres = [];
-  $('a[href*="/genero/"], .genres a, .genero a').each((_, el) => {
-    const t = $(el).text().trim();
-    if (t && genres.indexOf(t) < 0) genres.push(t);
-  });
+  var title =
+    clean($('h1').first().text()) ||
+    clean($('meta[property="og:title"]').attr('content')) ||
+    clean($('title').text());
+  title = title.replace(/\s*[-|]\s*JKAnime.*$/i, '').trim();
 
-  // Episodios: intentar listado en página o links /slug/N/
-  const slug = slugFromUrl(url);
-  const episodes = [];
-  const seenEp = {};
+  var poster = absUrl(
+    $('meta[property="og:image"]').attr('content') ||
+      $('.anime_info img, .poster img, .sinopsis img, .anime__details__pic').first().attr('src') ||
+      $('.anime__details__pic').attr('data-setbg') ||
+      ''
+  );
+  var overview =
+    clean($('meta[property="og:description"]').attr('content')) ||
+    clean($('.sinopsis p, .anime_info p, .description, #sinopsis').first().text());
 
-  // Enlaces de episodios
-  $('a[href*="/' + slug + '/"]').each((_, el) => {
-    const href = absUrl($(el).attr('href') || '');
-    const m = href.match(new RegExp('/' + slug + '/(\\d+)/?'));
-    if (!m) return;
-    const num = parseInt(m[1], 10);
-    if (!num || seenEp[num]) return;
+  var genres = [];
+  $('a[href*="/genero/"], .genres a, .genero a, .anime__details__widget a').each(
+    function (_, el) {
+      var t = clean($(el).text());
+      if (t && genres.indexOf(t) < 0) genres.push(t);
+    }
+  );
+
+  var slug = slugFromUrl(url);
+  var episodes = [];
+  var seenEp = {};
+  var re = new RegExp('/' + slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/(\\d+)/?', 'g');
+  var m;
+  while ((m = re.exec(html)) !== null) {
+    var num = parseInt(m[1], 10);
+    if (!num || seenEp[num]) continue;
     seenEp[num] = true;
     episodes.push({
       number: num,
       id: episodeId(slug, num),
       title: 'Episodio ' + num,
       still: poster,
-      overview: '',
     });
+  }
+
+  if (!episodes.length) {
+    var epCountMatch = html.match(/(\d+)\s*episodios?/i);
+    var total = epCountMatch ? parseInt(epCountMatch[1], 10) : 0;
+    if (total > 0 && total < 2000) {
+      for (var i = 1; i <= total; i++) {
+        episodes.push({
+          number: i,
+          id: episodeId(slug, i),
+          title: 'Episodio ' + i,
+          still: poster,
+        });
+      }
+    }
+  }
+
+  episodes.sort(function (a, b) {
+    return a.number - b.number;
   });
-
-  // Regex en HTML por si hay JSON de episodios
-  if (episodes.length === 0) {
-    const re = new RegExp('/' + slug + '/(\\d+)/', 'g');
-    let match;
-    while ((match = re.exec(html)) !== null) {
-      const num = parseInt(match[1], 10);
-      if (!num || seenEp[num]) continue;
-      seenEp[num] = true;
-      episodes.push({
-        number: num,
-        id: episodeId(slug, num),
-        title: 'Episodio ' + num,
-        still: poster,
-      });
-    }
-  }
-
-  episodes.sort((a, b) => a.number - b.number);
-
-  // Si no hay episodios detectados, generar placeholder 1..N si hay texto "X episodios"
-  if (episodes.length === 0) {
-    const epCountMatch = html.match(/(\d+)\s*episodios?/i);
-    const total = epCountMatch ? parseInt(epCountMatch[1], 10) : 12;
-    for (let i = 1; i <= Math.min(total, 200); i++) {
-      episodes.push({
-        number: i,
-        id: episodeId(slug, i),
-        title: 'Episodio ' + i,
-        still: poster,
-      });
-    }
-  }
-
-  const seasons = [
-    {
-      number: 1,
-      name: 'Temporada 1',
-      episodes: episodes,
-    },
-  ];
 
   return {
     id: idFromUrl(url),
-    title: title.replace(/\s*-\s*JKAnime.*$/i, '').trim() || 'Anime',
+    title: title || 'Anime',
     poster: poster,
     backdrop: poster,
     type: 'series',
     overview: overview,
     genres: genres,
-    seasons: seasons,
+    seasons: [
+      {
+        number: 1,
+        name: 'Temporada 1',
+        episodes: episodes,
+      },
+    ],
     extra: { url: url, slug: slug },
   };
 }
 
 // ───────────────────── STREAMS ─────────────────────
 
-function fixHost(u) {
-  if (!u) return u;
-  return u
-    .replace('https://sfastwish.com/', 'https://flaswish.com/')
-    .replace('http://sfastwish.com/', 'https://flaswish.com/')
-    .replace('https://vidhidevip.com/', 'https://callistanise.com/')
-    .replace('http://vidhidevip.com/', 'https://callistanise.com/');
-}
-
-function episodeUrlFromId(id) {
-  // jk:slug:12  o  url completa
-  if (typeof id === 'string' && id.startsWith('http')) return id;
-  if (typeof id === 'string' && id.startsWith('jk:')) {
-    const rest = id.slice(3);
-    const parts = rest.split(':');
-    if (parts.length >= 2) {
+function episodeUrlFromArgs(id, type, season, episode) {
+  if (id && typeof id === 'object') {
+    var o = id;
+    id = o.id || o.metaId || o.url;
+    if (o.episode != null) episode = o.episode;
+    if (o.season != null) season = o.season;
+  }
+  if (typeof id === 'string' && /^https?:\/\//i.test(id) && /\/\d+\/?$/.test(id)) {
+    return id.replace(/\/?$/, '/');
+  }
+  if (typeof id === 'string' && id.indexOf('jk:') === 0) {
+    var rest = id.slice(3);
+    var parts = rest.split(':');
+    if (parts.length >= 2 && /^\d+$/.test(parts[1])) {
       return baseUrl() + '/' + parts[0] + '/' + parts[1] + '/';
     }
-    return baseUrl() + '/' + parts[0] + '/';
+    var ep = episode != null ? episode : 1;
+    return baseUrl() + '/' + parts[0] + '/' + ep + '/';
   }
-  return absUrl(String(id));
+  var slug = slugFromUrl(String(id));
+  var epn = episode != null ? episode : 1;
+  return baseUrl() + '/' + slug + '/' + epn + '/';
 }
 
 async function getStreams(id, type, season, episode) {
-  // Compat: getStreams(id) | getStreams(id, type, s, e) | getStreams({id, season, episode})
-  let epUrl = '';
-  if (id && typeof id === 'object') {
-    const o = id;
-    id = o.id || o.metaId || o.url;
-    season = o.season != null ? o.season : season;
-    episode = o.episode != null ? o.episode : episode;
+  var epUrl = episodeUrlFromArgs(id, type, season, episode);
+  var html = await fetchHtml(epUrl, pageHeaders({ Referer: baseUrl() + '/' }));
+  var streams = [];
+  var seen = {};
+
+  function push(src, name, language) {
+    src = fixHost(String(src || '').replace(/&amp;/g, '&'));
+    if (!src || seen[src]) return;
+    if (!/^https?:\/\//i.test(src)) return;
+    if (/google|facebook|doubleclick|ads\./i.test(src)) return;
+    seen[src] = true;
+    streams.push({
+      url: src,
+      name: name || 'Servidor',
+      provider: 'jkanime',
+      language: language || undefined,
+      headers: {
+        Referer: baseUrl() + '/',
+        'User-Agent': UA,
+      },
+      isHls: /\.m3u8/i.test(src),
+    });
   }
 
-  if (typeof id === 'string' && id.indexOf(':') > -1 && !id.startsWith('http')) {
-    // jk:slug:ep
-    const parts = id.replace(/^jk:/, '').split(':');
-    if (parts.length >= 2 && /^\d+$/.test(parts[1])) {
-      epUrl = baseUrl() + '/' + parts[0] + '/' + parts[1] + '/';
-    } else if (episode != null) {
-      epUrl = baseUrl() + '/' + parts[0] + '/' + episode + '/';
-    } else {
-      epUrl = baseUrl() + '/' + parts[0] + '/1/';
-    }
-  } else if (episode != null && typeof id === 'string') {
-    const slug = slugFromUrl(id.startsWith('http') ? id : baseUrl() + '/' + id);
-    epUrl = baseUrl() + '/' + slug + '/' + episode + '/';
-  } else {
-    epUrl = episodeUrlFromId(id);
-  }
-
-  // Si la URL no termina en /N/, forzar episodio 1
-  if (!/\/\d+\/?$/.test(epUrl)) {
-    epUrl = epUrl.replace(/\/?$/, '/1/');
-  }
-
-  const html = await fetchHtml(epUrl);
-  const streams = [];
-  const seen = {};
-
-  // video[N] = '...iframe src=...'
-  const videoRe = /video\[(\d+)\]\s*=\s*([^;]+);/gi;
-  let m;
+  var videoRe = /video\[(\d+)\]\s*=\s*([^;]+);/gi;
+  var m;
   while ((m = videoRe.exec(html)) !== null) {
-    const idx = parseInt(m[1], 10);
-    const content = m[2] || '';
-    const iframeM = content.match(/<iframe[^>]+src=["']([^"']+)["']/i);
-    if (!iframeM) continue;
-    let src = iframeM[1]
-      .replace(/&amp;/g, '&')
-      .replace(/&quot;/g, '"')
-      .replace(/&#039;/g, "'");
-    if (src.startsWith('//')) src = 'https:' + src;
-    src = fixHost(src);
-    if (!src || seen[src]) continue;
-    seen[src] = true;
-    streams.push({
-      url: src,
-      name: 'Servidor ' + (idx + 1),
-      provider: 'jkanime',
-      language: cfg('preferLanguage', 'any') === 'latino' ? 'Latino' : 'Sub',
-      headers: { Referer: baseUrl() + '/', 'User-Agent': UA },
-      isHls: /\.m3u8/i.test(src),
-    });
+    var idx = parseInt(m[1], 10);
+    var content = m[2] || '';
+    var iframeM = content.match(/<iframe[^>]+src=["']([^"']+)["']/i);
+    if (iframeM) push(iframeM[1], 'Servidor ' + (idx + 1));
   }
 
-  // servers / downloads remotos
-  const remoteRe =
-    /(?:remote|data-url|href)=["'](https?:\/\/[^"']+(?:streamwish|vidhide|filemoon|mp4upload|dood|ok\.ru)[^"']*)["']/gi;
-  while ((m = remoteRe.exec(html)) !== null) {
-    let src = fixHost(m[1]);
-    if (seen[src]) continue;
-    seen[src] = true;
-    let name = 'Servidor';
-    if (/streamwish|flaswish|sfastwish/i.test(src)) name = 'StreamWish';
-    else if (/vidhide|callistanise/i.test(src)) name = 'VidHide';
-    else if (/filemoon/i.test(src)) name = 'Filemoon';
-    else if (/mp4upload/i.test(src)) name = 'Mp4Upload';
-    streams.push({
-      url: src,
-      name: name,
-      provider: 'jkanime',
-      headers: { Referer: baseUrl() + '/', 'User-Agent': UA },
-      isHls: /\.m3u8/i.test(src),
-    });
+  var serversMatch = /var\s+servers\s*=\s*\[([\s\S]*?)\];/i.exec(html);
+  if (serversMatch) {
+    var chunk = serversMatch[1];
+    var objRe = /\{([^}]+)\}/g;
+    var om;
+    while ((om = objRe.exec(chunk)) !== null) {
+      var objStr = om[1];
+      var server = {};
+      var pairs = objStr.split(',');
+      for (var pi = 0; pi < pairs.length; pi++) {
+        var pair = pairs[pi];
+        if (pair.indexOf(':') < 0) continue;
+        var colon = pair.indexOf(':');
+        var key = pair.slice(0, colon).trim().replace(/["']/g, '');
+        var value = pair
+          .slice(colon + 1)
+          .trim()
+          .replace(/^["'\s]+|["'\s]+$/g, '');
+        if (key === 'remote') {
+          try {
+            value = b64decode(value);
+          } catch (_) {}
+        }
+        server[key] = value;
+      }
+      if (server.remote) {
+        var langName = 'Sub';
+        var lc = parseInt(server.lang || '1', 10);
+        if (lc === 2 || lc === 4) langName = 'Latino';
+        push(server.remote, server.server || 'Servidor', langName);
+      }
+    }
   }
 
-  // iframes sueltos
-  const iframeRe = /<iframe[^>]+src=["']([^"']+)["']/gi;
+  var iframeRe = /<iframe[^>]+src=["']([^"']+)["']/gi;
   while ((m = iframeRe.exec(html)) !== null) {
-    let src = m[1].replace(/&amp;/g, '&');
-    if (src.startsWith('//')) src = 'https:' + src;
-    src = fixHost(src);
-    if (!src || seen[src]) continue;
-    if (!/^https?:\/\//i.test(src)) continue;
-    // filtrar tracking
-    if (/google|facebook|ads/i.test(src)) continue;
-    seen[src] = true;
-    streams.push({
-      url: src,
-      name: 'Embed',
-      provider: 'jkanime',
-      headers: { Referer: baseUrl() + '/', 'User-Agent': UA },
-      isHls: /\.m3u8/i.test(src),
-    });
+    push(m[1], 'Embed');
   }
 
   return streams;
 }
 
-// ───────────────────── EXPORTS ─────────────────────
-
 module.exports = {
-  getHome,
-  getNews,
-  search,
-  getDiscover,
-  getDiscoverFilters,
-  getMeta,
-  getStreams,
+  getHome: getHome,
+  getNews: getNews,
+  search: search,
+  getDiscover: getDiscover,
+  getDiscoverFilters: getDiscoverFilters,
+  getMeta: getMeta,
+  getStreams: getStreams,
 };
