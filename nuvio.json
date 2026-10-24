@@ -1,0 +1,40 @@
+{
+  "id": "jkanime",
+  "name": "JKAnime",
+  "version": "1.0.0",
+  "description": "Catálogo de anime (jkanime.net): Home, Descubrir, Buscar, Novedades y streams.",
+  "author": "adapted-from-app",
+  "icon": "https://jkanime.net/assets/img/logoJK.png",
+  "banner": "https://cdn.jkdesa.com/assets/images/logo.png",
+  "entry": "index.js",
+  "languages": ["Latino", "Subtitulado"],
+  "capabilities": [
+    "home",
+    "discover",
+    "search",
+    "meta",
+    "streams",
+    "news",
+    "config"
+  ],
+  "config": [
+    {
+      "key": "baseUrl",
+      "label": "URL base del sitio",
+      "type": "url",
+      "default": "https://jkanime.net"
+    },
+    {
+      "key": "preferLanguage",
+      "label": "Idioma preferido",
+      "type": "select",
+      "options": [
+        { "id": "any", "label": "Cualquiera" },
+        { "id": "latino", "label": "Latino" },
+        { "id": "sub", "label": "Subtitulado" }
+      ],
+      "default": "any"
+    }
+  ],
+  "pages": ["home", "discover", "search", "news", "config"]
+}
