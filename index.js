@@ -209,23 +209,34 @@ function directorioItemsToContent(data) {
     var a = list[i];
     if (!a || typeof a !== 'object') continue;
     var href = absUrl(a.url || '');
-    if (!href && a.slug) href = baseUrl() + '/' + a.slug + '/';
+    if (!href && a.slug) href = baseUrl() + '/' + String(a.slug).replace(/^\/+/, '') + '/';
+    if (!href) continue;
+    if (!/\/$/.test(href)) href += '/';
     var img = absUrl(a.image || a.poster || '');
+    var studio = '';
+    if (a.studios) {
+      if (typeof a.studios === 'string') studio = a.studios;
+      else if (a.studios.nombre) studio = a.studios.nombre;
+    }
     items.push({
-      id: idFromUrl(href) || 'jk:' + (a.id || i),
+      // IMPORTANTE: id = URL completa para que getMeta abra la ficha
+      id: href,
       title: a.title || a.short_title || a.name || 'Anime',
       poster: img,
       backdrop: img,
       type: 'series',
-      overview: a.synopsis || a.status || a.estado || '',
+      overview: a.synopsis || a.estado || a.status || '',
       genres: a.tipo ? [String(a.tipo)] : [],
       year: a.year || a.aired || '',
       rating: a.rating || a.score || null,
       extra: {
         url: href,
-        status: a.status || a.estado || '',
-        tipo: a.tipo || '',
+        slug: a.slug || slugFromUrl(href),
+        status: a.estado || a.status || '',
+        tipo: a.tipo || a.type || '',
         animeId: a.id,
+        studio: studio,
+        episodes: a.episodes,
       },
     });
   }
@@ -236,11 +247,12 @@ async function fetchDirectorioPage(page, filters) {
   var params = [];
   if (page > 1) params.push('p=' + page);
   var f = filters || {};
-  if (f.filtro) params.push('filtro=' + encodeURIComponent(f.filtro));
-  if (f.tipo) params.push('tipo=' + encodeURIComponent(f.tipo));
-  if (f.categoria) params.push('categoria=' + encodeURIComponent(f.categoria));
-  if (f.genero) params.push('genero=' + encodeURIComponent(f.genero));
-  if (f.orden) params.push('orden=' + encodeURIComponent(f.orden));
+  // Parámetros reales del form de jkanime /directorio
+  ['filtro', 'genero', 'letra', 'demografia', 'categoria', 'tipo', 'estado', 'fecha', 'orden'].forEach(function (k) {
+    if (f[k] != null && String(f[k]).trim() !== '') {
+      params.push(k + '=' + encodeURIComponent(String(f[k]).trim()));
+    }
+  });
   var q = params.length ? '?' + params.join('&') : '';
   var url = baseUrl() + '/directorio' + q;
   var html = await fetchHtml(url);
@@ -284,15 +296,16 @@ async function getHome() {
     var links = $el.find('div.slider-btns a, a.btn, a');
     var detailsUrl = absUrl(links.eq(0).attr('href') || '');
     if (!title && !detailsUrl) return;
+    if (detailsUrl && !/\/$/.test(detailsUrl)) detailsUrl += '/';
     heroItems.push({
-      id: idFromUrl(detailsUrl) || 'jk:hero-' + heroItems.length,
+      id: detailsUrl || ('jk:hero-' + heroItems.length),
       title: title || 'Destacado',
       poster: image,
       backdrop: image,
       type: 'series',
       overview: desc || status,
       genres: type ? [type] : [],
-      extra: { url: detailsUrl, status: status },
+      extra: { url: detailsUrl, status: status, slug: slugFromUrl(detailsUrl) },
     });
   });
   if (heroItems.length) {
@@ -333,14 +346,15 @@ async function getHome() {
       var t =
         clean($card.find('h5.card-title, .card-title, h5, h6').first().text()) ||
         alt;
+      if (!/\/$/.test(href)) href += '/';
       items.push({
-        id: idFromUrl(href),
+        id: href,
         title: t || 'Anime',
         poster: img,
         backdrop: img,
         type: 'series',
         overview: episode || date,
-        extra: { url: href, episode: episode, date: date },
+        extra: { url: href, episode: episode, date: date, slug: slugFromUrl(href) },
       });
     });
     if (items.length) {
@@ -374,13 +388,14 @@ async function getHome() {
         var t =
           clean($card.find('h5.card-title, .card-title').text()) ||
           clean(link.find('img').attr('alt') || '');
+        if (!/\/$/.test(href)) href += '/';
         items.push({
-          id: id,
+          id: href,
           title: t || 'Anime',
           poster: img,
           backdrop: img,
           type: 'series',
-          extra: { url: href },
+          extra: { url: href, slug: slugFromUrl(href) },
         });
       });
     if (items.length) {
@@ -405,14 +420,15 @@ async function getHome() {
     var img = absUrl(a.find('img').attr('src') || '');
     var t = clean($el.find('h5.card-title a, h5 a, .card-title').text());
     var status = clean($el.find('div.card-info p, p').first().text());
+    if (!/\/$/.test(href)) href += '/';
     recent.push({
-      id: idFromUrl(href),
+      id: href,
       title: t || 'Anime',
       poster: img,
       backdrop: img,
       type: 'series',
       overview: status,
-      extra: { url: href },
+      extra: { url: href, slug: slugFromUrl(href) },
     });
   });
   if (recent.length) {
@@ -443,13 +459,14 @@ async function getHome() {
       var t = clean($(el).find('img').attr('alt') || $(el).text());
       if (!t || t.length < 2) return;
       seen[id] = true;
+      if (!/\/$/.test(href)) href += '/';
       grab.push({
-        id: id,
+        id: href,
         title: t,
         poster: img,
         backdrop: img,
         type: 'series',
-        extra: { url: href },
+        extra: { url: href, slug: slugFromUrl(href) },
       });
     });
     if (grab.length) {
@@ -575,23 +592,33 @@ function parseSearchHtml(html) {
   var items = [];
   var seen = {};
 
-  // Exacto BuscarApi
+  // Estructura real buscar/anohana:
+  // div.row.page_directorio > div[data-g] > div.anime__item
   $('div.page_directorio div.anime__item, div.anime__item').each(function (_, el) {
     var $item = $(el);
     var linkNode = $item.find('h5 a').first();
-    if (!linkNode.length) linkNode = $item.find('a[href*="jkanime"]').first();
+    if (!linkNode.length) {
+      linkNode = $item.find('a[href*="jkanime.net/"]').filter(function () {
+        var h = $(this).attr('href') || '';
+        return h.indexOf('/buscar') < 0 && h.indexOf('/directorio') < 0 && h.indexOf('/genero') < 0;
+      }).first();
+    }
     if (!linkNode.length) linkNode = $item.find('a').first();
 
     var title = clean(linkNode.text());
-    var href = absUrl(linkNode.attr('href') || '');
-    if (!title || !href) return;
+    var href = absUrl(linkNode.attr('href') || $item.find('a').first().attr('href') || '');
+    if (!href) return;
+    if (!/\/$/.test(href)) href += '/';
+    if (/\/\d+\/$/.test(href)) return;
+    if (!title) title = clean($item.find('img').attr('alt') || '') || slugFromUrl(href);
+    if (!title) return;
 
-    var picNode = $item.find('div.anime__item__pic').first();
+    var picNode = $item.find('div.anime__item__pic, .anime__item__pic, .set-bg').first();
     var image = picNode.attr('data-setbg') || '';
     if (!image) {
       var style = picNode.attr('style') || '';
-      var m = /url\(["']?(.*?)["']?\)/i.exec(style);
-      if (m) image = m[1];
+      var mm = /url\(["']?(.*?)["']?\)/i.exec(style);
+      if (mm) image = mm[1];
     }
     if (!image) image = $item.find('img').attr('src') || '';
 
@@ -601,50 +628,21 @@ function parseSearchHtml(html) {
     if (lis.length > 0) status = clean(lis.eq(0).text());
     if (lis.length > 1) type = clean(lis.eq(1).text());
 
-    var id = idFromUrl(href);
-    if (seen[id]) return;
-    seen[id] = true;
+    if (seen[href]) return;
+    seen[href] = true;
 
     items.push({
-      id: id,
+      id: href,
       title: title,
       poster: absUrl(image),
       backdrop: absUrl(image),
       type: 'series',
       overview: status,
       genres: type ? [type] : [],
-      extra: { url: href, status: status, type: type },
+      extra: { url: href, status: status, type: type, slug: slugFromUrl(href) },
     });
   });
 
-  // Fallback genérico
-  if (!items.length) {
-    $('a[href*="jkanime.net/"]').each(function (_, el) {
-      var href = absUrl($(el).attr('href') || '');
-      if (!href || /\/(buscar|directorio|genero|letra|horario)/i.test(href)) return;
-      if (/\/\d+\/?$/.test(href)) return;
-      var id = idFromUrl(href);
-      if (!id || seen[id]) return;
-      var $el = $(el);
-      var title = clean($el.find('h5, h6, .title').text() || $el.attr('title') || $el.text());
-      if (!title || title.length < 2) return;
-      var img = absUrl(
-        $el.find('img').attr('src') ||
-          $el.closest('[data-setbg]').attr('data-setbg') ||
-          $el.parent().find('[data-setbg]').attr('data-setbg') ||
-          ''
-      );
-      seen[id] = true;
-      items.push({
-        id: id,
-        title: title,
-        poster: img,
-        backdrop: img,
-        type: 'series',
-        extra: { url: href },
-      });
-    });
-  }
   return items;
 }
 
@@ -652,11 +650,12 @@ async function search(query) {
   var q = clean(query);
   if (!q) return [];
 
-  var encoded = encodeURIComponent(q);
+  // URL real: https://jkanime.net/buscar/anohana
+  var pathQ = encodeURIComponent(q).replace(/%20/g, '+');
   var urls = [
-    baseUrl() + '/buscar/' + encoded,
-    baseUrl() + '/buscar/' + encoded + '/',
-    baseUrl() + '/buscar/' + q.replace(/\s+/g, '+'),
+    baseUrl() + '/buscar/' + pathQ,
+    baseUrl() + '/buscar/' + pathQ + '/',
+    baseUrl() + '/buscar/' + encodeURIComponent(q),
   ];
 
   var lastErr = null;
@@ -669,28 +668,26 @@ async function search(query) {
       lastErr = e;
     }
   }
-
-  // Fallback: directorio no tiene search real; devolver vacío o error claro
   if (lastErr) throw lastErr;
   return [];
 }
 
-// ───────────────────── DISCOVER ─────────────────────
+// ───────────────────── DISCOVER ───────────────────── ─────────────────────
 
 async function getDiscoverFilters() {
-  // Igual que directorio.dart de tu app
+  // Filtros reales de jkanime.net/directorio (HTML actual)
   return [
     {
       id: 'tipo',
       name: 'Tipo',
       type: 'select',
       options: [
-        { id: '', label: 'Todos' },
+        { id: '', label: 'Sin tipo' },
         { id: 'animes', label: 'Animes' },
         { id: 'peliculas', label: 'Películas' },
+        { id: 'especiales', label: 'Especiales' },
         { id: 'ovas', label: 'OVAs' },
         { id: 'onas', label: 'ONAs' },
-        { id: 'especiales', label: 'Especiales' },
       ],
     },
     {
@@ -698,7 +695,7 @@ async function getDiscoverFilters() {
       name: 'Categoría',
       type: 'select',
       options: [
-        { id: '', label: 'Todas' },
+        { id: '', label: 'Sin categoría' },
         { id: 'donghua', label: 'Donghua' },
         { id: 'latino', label: 'Latino' },
       ],
@@ -708,26 +705,60 @@ async function getDiscoverFilters() {
       name: 'Género',
       type: 'select',
       options: [
-        { id: '', label: 'Todos' },
+        { id: '', label: 'Sin género' },
         { id: 'accion', label: 'Acción' },
         { id: 'aventura', label: 'Aventura' },
+        { id: 'autos', label: 'Autos' },
         { id: 'comedia', label: 'Comedia' },
+        { id: 'dementia', label: 'Dementia' },
+        { id: 'demonios', label: 'Demonios' },
+        { id: 'misterio', label: 'Misterio' },
         { id: 'drama', label: 'Drama' },
         { id: 'ecchi', label: 'Ecchi' },
         { id: 'fantasia', label: 'Fantasía' },
-        { id: 'misterio', label: 'Misterio' },
-        { id: 'romance', label: 'Romance' },
-        { id: 'sci-fi', label: 'Sci-Fi' },
-        { id: 'shounen', label: 'Shounen' },
-        { id: 'shoujo', label: 'Shoujo' },
-        { id: 'seinen', label: 'Seinen' },
-        { id: 'sobrenatural', label: 'Sobrenatural' },
+        { id: 'juegos', label: 'Juegos' },
+        { id: 'historico', label: 'Histórico' },
         { id: 'terror', label: 'Terror' },
-        { id: 'deportes', label: 'Deportes' },
+        { id: 'nios', label: 'Niños' },
+        { id: 'magia', label: 'Magia' },
+        { id: 'artes-marciales', label: 'Artes Marciales' },
         { id: 'mecha', label: 'Mecha' },
-        { id: 'isekai', label: 'Isekai' },
+        { id: 'musica', label: 'Música' },
+        { id: 'parodia', label: 'Parodia' },
+        { id: 'samurai', label: 'Samurai' },
+        { id: 'romance', label: 'Romance' },
+        { id: 'colegial', label: 'Colegial' },
+        { id: 'sci-fi', label: 'Sci-Fi' },
+        { id: 'shoujo', label: 'Shoujo' },
+        { id: 'shoujo-ai', label: 'Shoujo Ai' },
+        { id: 'shounen', label: 'Shounen' },
+        { id: 'shounen-ai', label: 'Shounen Ai' },
+        { id: 'space', label: 'Space' },
+        { id: 'deportes', label: 'Deportes' },
+        { id: 'super-poderes', label: 'Super Poderes' },
+        { id: 'vampiros', label: 'Vampiros' },
         { id: 'harem', label: 'Harem' },
+        { id: 'cosas-de-la-vida', label: 'Cosas de la vida' },
+        { id: 'sobrenatural', label: 'Sobrenatural' },
+        { id: 'militar', label: 'Militar' },
+        { id: 'policial', label: 'Policial' },
+        { id: 'psicologico', label: 'Psicológico' },
+        { id: 'thriller', label: 'Thriller' },
+        { id: 'seinen', label: 'Seinen' },
+        { id: 'josei', label: 'Josei' },
         { id: 'latino', label: 'Español Latino' },
+        { id: 'isekai', label: 'Isekai' },
+      ],
+    },
+    {
+      id: 'estado',
+      name: 'Estado',
+      type: 'select',
+      options: [
+        { id: '', label: 'Ninguno' },
+        { id: 'emision', label: 'En emisión' },
+        { id: 'finalizados', label: 'Finalizado' },
+        { id: 'estrenos', label: 'Por estrenar' },
       ],
     },
     {
@@ -741,12 +772,50 @@ async function getDiscoverFilters() {
       ],
     },
     {
-      id: 'orden',
-      name: 'Orden',
+      id: 'letra',
+      name: 'Letra',
       type: 'select',
       options: [
-        { id: '', label: 'Descendente' },
-        { id: 'asc', label: 'Ascendente' },
+        { id: '', label: 'Sin letra' },
+        { id: 'A', label: 'A' }, { id: 'B', label: 'B' }, { id: 'C', label: 'C' },
+        { id: 'D', label: 'D' }, { id: 'E', label: 'E' }, { id: 'F', label: 'F' },
+        { id: 'G', label: 'G' }, { id: 'H', label: 'H' }, { id: 'I', label: 'I' },
+        { id: 'J', label: 'J' }, { id: 'K', label: 'K' }, { id: 'L', label: 'L' },
+        { id: 'M', label: 'M' }, { id: 'N', label: 'N' }, { id: 'O', label: 'O' },
+        { id: 'P', label: 'P' }, { id: 'Q', label: 'Q' }, { id: 'R', label: 'R' },
+        { id: 'S', label: 'S' }, { id: 'T', label: 'T' }, { id: 'U', label: 'U' },
+        { id: 'V', label: 'V' }, { id: 'W', label: 'W' }, { id: 'X', label: 'X' },
+        { id: 'Y', label: 'Y' }, { id: 'Z', label: 'Z' },
+      ],
+    },
+    {
+      id: 'demografia',
+      name: 'Demografía',
+      type: 'select',
+      options: [
+        { id: '', label: 'Sin demografía' },
+        { id: 'nios', label: 'Niños' },
+        { id: 'shoujo', label: 'Shoujo' },
+        { id: 'shounen', label: 'Shounen' },
+        { id: 'seinen', label: 'Seinen' },
+        { id: 'josei', label: 'Josei' },
+      ],
+    },
+    {
+      id: 'fecha',
+      name: 'Año',
+      type: 'select',
+      options: [
+        { id: '', label: 'Sin año' },
+        { id: '2026', label: '2026' }, { id: '2025', label: '2025' },
+        { id: '2024', label: '2024' }, { id: '2023', label: '2023' },
+        { id: '2022', label: '2022' }, { id: '2021', label: '2021' },
+        { id: '2020', label: '2020' }, { id: '2019', label: '2019' },
+        { id: '2018', label: '2018' }, { id: '2017', label: '2017' },
+        { id: '2016', label: '2016' }, { id: '2015', label: '2015' },
+        { id: '2014', label: '2014' }, { id: '2013', label: '2013' },
+        { id: '2012', label: '2012' }, { id: '2011', label: '2011' },
+        { id: '2010', label: '2010' },
       ],
     },
   ];
@@ -758,7 +827,7 @@ async function getDiscover(opts) {
   var filters = {};
 
   // La app puede mandar filterId / filters map
-  ['filtro', 'tipo', 'categoria', 'genero', 'genre', 'orden'].forEach(function (k) {
+  ['filtro', 'tipo', 'categoria', 'genero', 'genre', 'orden', 'estado', 'letra', 'demografia', 'fecha'].forEach(function (k) {
     if (opts[k] != null && String(opts[k]) !== '') filters[k] = String(opts[k]);
   });
   if (opts.filter && !filters.tipo) {
@@ -853,7 +922,7 @@ async function fetchEpisodesAjax(animeId, slug, csrf, cookieHeader) {
       }
       all.push({
         number: number,
-        id: episodeId(slug, number),
+        id: baseUrl() + '/' + slug + '/' + number + '/',
         title: 'Capítulo ' + number,
         still: image,
         overview: '',
@@ -890,32 +959,41 @@ async function getMeta(id, extra) {
   var html = await fetchHtml(url);
   var $ = getCheerio().load(html);
 
-  // Título: div.anime_info h3 (ContentApi)
+  // Título: div.anime_info h3 (HTML real AnoHana)
   var title = clean($('div.anime_info h3').first().text());
+  var altTitle = clean($('div.anime_info > span').first().text());
   if (!title) {
     title = clean($('meta[property="og:title"]').attr('content'));
     title = title.replace(/\s*[—\-–|]\s*Jk?Anime.*$/i, '').trim();
+    title = title.replace(/\s*-\s*anime\s+.*$/i, '').trim();
   }
   if (!title) {
-    title = clean($('title').text()).replace(/\s*[—\-–|]\s*Jk?Anime.*$/i, '').trim();
+    title = clean($('title').text())
+      .replace(/\s*[—\-–|]\s*Jk?Anime.*$/i, '')
+      .replace(/\s*-\s*anime\s+.*$/i, '')
+      .trim();
   }
 
   // Sinopsis: div.anime_info p.scroll
   var overview = clean($('div.anime_info p.scroll').first().text());
   if (!overview) {
     overview =
+      clean($('meta[name="description"]').attr('content')) ||
       clean($('meta[property="og:description"]').attr('content')) ||
-      clean($('.sinopsis p, #sinopsis, .anime_info p').first().text());
+      clean($('div.anime_info p').first().text());
+  }
+  if (altTitle && overview.indexOf(altTitle) < 0) {
+    overview = altTitle + (overview ? '\n' + overview : '');
   }
 
-  // Imagen: div.anime_pic img
-  var poster = absUrl($('div.anime_pic img').first().attr('src') || '');
+  // Imagen: div.anime_pic img o og:image
+  var poster = absUrl(
+    $('div.anime_pic img').first().attr('src') ||
+      $('div.movpic img').first().attr('src') ||
+      ''
+  );
   if (!poster) {
-    poster = absUrl(
-      $('meta[property="og:image"]').attr('content') ||
-        $('.anime__details__pic').attr('data-setbg') ||
-        ''
-    );
+    poster = absUrl($('meta[property="og:image"]').attr('content') || '');
   }
 
   var type = '';
@@ -1010,7 +1088,7 @@ async function getMeta(id, extra) {
       seenEp[num] = true;
       episodes.push({
         number: num,
-        id: episodeId(slug, num),
+        id: baseUrl() + '/' + slug + '/' + num + '/',
         title: 'Capítulo ' + num,
         still: poster,
       });
@@ -1026,7 +1104,7 @@ async function getMeta(id, extra) {
       for (var i = 1; i <= total; i++) {
         episodes.push({
           number: i,
-          id: episodeId(slug, i),
+          id: baseUrl() + '/' + slug + '/' + i + '/',
           title: 'Capítulo ' + i,
           still: poster,
         });
@@ -1038,7 +1116,7 @@ async function getMeta(id, extra) {
   if (!episodes.length && slug) {
     episodes.push({
       number: 1,
-      id: episodeId(slug, 1),
+      id: baseUrl() + '/' + slug + '/1/',
       title: 'Capítulo 1',
       still: poster,
     });
@@ -1053,7 +1131,7 @@ async function getMeta(id, extra) {
   if (studios.length) overviewParts.push('Estudio: ' + studios.join(', '));
 
   return {
-    id: idFromUrl(url),
+    id: url,
     title: title || slug || 'Anime',
     poster: poster,
     backdrop: poster,
